@@ -589,7 +589,7 @@ extern "C" {
     LLAMA_API const struct llama_model * llama_get_model   (const struct llama_context * ctx);
     // Caller must serialize this with inference; the server does so at decode boundaries.
     LLAMA_API bool llama_model_moe_cache_resize(const struct llama_model * model, int32_t n_slots,
-            int32_t * old_slots, size_t * released_bytes, size_t * allocated_bytes);
+            int32_t * old_slots, int32_t * new_slots, size_t * released_bytes, size_t * allocated_bytes);
     LLAMA_API           llama_memory_t   llama_get_memory  (const struct llama_context * ctx);
     LLAMA_API  enum llama_pooling_type   llama_pooling_type(const struct llama_context * ctx); // TODO: rename to llama_get_pooling_type
 

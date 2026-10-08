@@ -2486,8 +2486,7 @@ private:
                     size_t allocated_bytes = 0;
                     res->success = llama_model_moe_cache_resize(
                             llama_get_model(ctx_tgt), task.moe_cache_slots,
-                            &res->old_slots, &released_bytes, &allocated_bytes);
-                    res->new_slots = res->success ? task.moe_cache_slots : res->old_slots;
+                            &res->old_slots, &res->new_slots, &released_bytes, &allocated_bytes);
                     res->released_bytes = released_bytes;
                     res->allocated_bytes = allocated_bytes;
                     if (!res->success) {

@@ -2014,21 +2014,21 @@ void llama_model_base::init_moe_expert_cache() {
 }
 
 bool llama_model_base::resize_moe_expert_cache(int32_t n_slots, int32_t & old_slots,
-        size_t & released_bytes, size_t & allocated_bytes) {
+        int32_t & new_slots, size_t & released_bytes, size_t & allocated_bytes) {
     old_slots = pimpl->moe_cache_slots;
+    new_slots = old_slots;
     released_bytes = 0;
     allocated_bytes = 0;
 
-    if (!params.moe_cache_live_resize || old_slots <= 0 || pimpl->moe_cache_bundle_index >= pimpl->ctxs_bufs.size()) {
-        return false;
-    }
-    if (n_slots <= 0) {
+    if (!params.moe_cache_live_resize || n_slots <= 0 || pimpl->moe_cache_rankings.empty()) {
         return false;
     }
     if (n_slots == old_slots) {
         return true;
     }
-    if (pimpl->moe_cache_rankings.empty()) {
+
+    const bool had_cache = old_slots > 0 && pimpl->moe_cache_bundle_index < pimpl->ctxs_bufs.size();
+    if (old_slots > 0 && !had_cache) {
         return false;
     }
 
@@ -2041,10 +2041,12 @@ bool llama_model_base::resize_moe_expert_cache(int32_t n_slots, int32_t & old_sl
     }
     ggml_backend_buffer_type_t buft = ggml_backend_dev_buffer_type(dev);
 
-    const size_t old_index = pimpl->moe_cache_bundle_index;
+    const size_t old_index = had_cache ? pimpl->moe_cache_bundle_index : SIZE_MAX;
     size_t old_buffer_bytes = 0;
-    for (const auto & buf : pimpl->ctxs_bufs[old_index].second) {
-        old_buffer_bytes += ggml_backend_buffer_get_size(buf.get());
+    if (had_cache) {
+        for (const auto & buf : pimpl->ctxs_bufs[old_index].second) {
+            old_buffer_bytes += ggml_backend_buffer_get_size(buf.get());
+        }
     }
 
     const size_t n_layers = pimpl->moe_cache_rankings.size();
@@ -2067,7 +2069,12 @@ bool llama_model_base::resize_moe_expert_cache(int32_t n_slots, int32_t & old_sl
         ggml_tensor * map_cold;
     };
     std::vector<resized_layer> resized;
+    std::vector<resized_layer> old_resized;
+    resized.reserve(n_layers);
+    old_resized.reserve(n_layers);
 
+    size_t max_slab = 0;
+    int64_t max_experts = 0;
     for (const auto & [il, _] : pimpl->moe_cache_rankings) {
         auto & l = layers[il];
         const int64_t n_expert = l.ffn_gate_exps->ne[2];
@@ -2092,49 +2099,132 @@ bool llama_model_base::resize_moe_expert_cache(int32_t n_slots, int32_t & old_sl
         ggml_format_name(next.map_hot, "blk.%d.moe_map_hot", il);
         ggml_format_name(next.map_cold, "blk.%d.moe_map_cold", il);
         resized.push_back(next);
+
+        if (had_cache) {
+            old_resized.push_back({il, l.ffn_gate_exps_hot, l.ffn_up_exps_hot, l.ffn_down_exps_hot, l.moe_map_hot, l.moe_map_cold});
+        }
+        max_experts = std::max(max_experts, n_expert);
+        max_slab = std::max(max_slab, std::max(l.ffn_gate_exps->nb[2], std::max(l.ffn_up_exps->nb[2], l.ffn_down_exps->nb[2])));
     }
 
-    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft);
+    pimpl->ctxs_bufs.reserve(pimpl->ctxs_bufs.size() + 1);
+    std::vector<ggml_backend_buffer_ptr> buffers;
+    buffers.reserve(1);
+    std::vector<uint8_t> slab;
+    slab.reserve(max_slab);
+    std::vector<int32_t> map_hot, map_cold;
+    map_hot.reserve(max_experts);
+    map_cold.reserve(max_experts);
+
+    auto fill_cache = [&](const std::vector<resized_layer> & target) {
+        for (const auto & item : target) {
+            auto & l = layers[item.il];
+            const auto & order = pimpl->moe_cache_rankings.at(item.il);
+            const int64_t n_expert = l.ffn_gate_exps->ne[2];
+            const int64_t slots = item.gate->ne[2];
+            map_hot.assign(n_expert, -1);
+            map_cold.resize(n_expert);
+            for (int64_t e = 0; e < n_expert; e++) {
+                map_cold[e] = (int32_t) e;
+            }
+            const ggml_tensor * srcs[3] = { l.ffn_gate_exps, l.ffn_up_exps, l.ffn_down_exps };
+            ggml_tensor * dsts[3] = { item.gate, item.up, item.down };
+            const int64_t count = std::min<int64_t>(slots, order.size());
+            for (int64_t s = 0; s < count; s++) {
+                const int32_t e = order[s];
+                map_hot[e] = (int32_t) s;
+                map_cold[e] = -1;
+                for (int t = 0; t < 3; t++) {
+                    const size_t nb = srcs[t]->nb[2];
+                    slab.resize(nb);
+                    ggml_backend_tensor_get(srcs[t], slab.data(), (size_t)e*nb, nb);
+                    ggml_backend_tensor_set(dsts[t], slab.data(), (size_t)s*nb, nb);
+                }
+            }
+            ggml_backend_tensor_set(item.map_hot, map_hot.data(), 0, n_expert*sizeof(int32_t));
+            ggml_backend_tensor_set(item.map_cold, map_cold.data(), 0, n_expert*sizeof(int32_t));
+        }
+    };
+
+    auto try_allocate = [&](ggml_context * tensor_ctx) {
+        try {
+            return ggml_backend_alloc_ctx_tensors_from_buft(tensor_ctx, buft);
+        } catch (...) {
+            return (ggml_backend_buffer_t) nullptr;
+        }
+    };
+
+    const size_t new_need = ggml_backend_alloc_ctx_tensors_from_buft_size(ctx.get(), buft);
+    const size_t reserve_bytes = 194*1024*1024;
+    size_t free_bytes = 0;
+    size_t total_bytes = 0;
+    ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
+    GGML_UNUSED(total_bytes);
+
+    const bool release_first = had_cache && free_bytes < new_need + reserve_bytes;
+    ggml_backend_buffer_t buf = release_first ? nullptr : try_allocate(ctx.get());
+    if (buf == nullptr && had_cache) {
+        ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
+        if (free_bytes + old_buffer_bytes < new_need + reserve_bytes) {
+            return false;
+        }
+
+        auto & old_bundle = pimpl->ctxs_bufs[old_index];
+        for (const auto & item : old_resized) {
+            ggml_tensor * tensors[5] = {item.gate, item.up, item.down, item.map_hot, item.map_cold};
+            for (ggml_tensor * tensor : tensors) {
+                tensor->buffer = nullptr;
+                tensor->data = nullptr;
+            }
+        }
+        for (const auto & item : resized) {
+            ggml_tensor * tensors[5] = {item.gate, item.up, item.down, item.map_hot, item.map_cold};
+            for (ggml_tensor * tensor : tensors) {
+                tensor->buffer = nullptr;
+                tensor->data = nullptr;
+            }
+        }
+        old_bundle.second.clear();
+
+        buf = try_allocate(ctx.get());
+        if (buf == nullptr) {
+            ggml_backend_buffer_t rollback = try_allocate(old_bundle.first.get());
+            if (rollback != nullptr) {
+                ggml_backend_buffer_ptr rollback_guard{rollback};
+                ggml_backend_buffer_set_usage(rollback_guard.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+                old_bundle.second.emplace_back(std::move(rollback_guard));
+                fill_cache(old_resized);
+                LLAMA_LOG_WARN("%s: resize allocation failed; restored %d-slot cache\n", __func__, old_slots);
+                return false;
+            }
+
+            for (const auto & [il, _] : pimpl->moe_cache_rankings) {
+                auto & l = layers[il];
+                l.ffn_gate_exps_hot = nullptr;
+                l.ffn_up_exps_hot = nullptr;
+                l.ffn_down_exps_hot = nullptr;
+                l.moe_map_hot = nullptr;
+                l.moe_map_cold = nullptr;
+            }
+            pimpl->ctxs_bufs.erase(pimpl->ctxs_bufs.begin() + old_index);
+            pimpl->moe_cache_bundle_index = SIZE_MAX;
+            pimpl->moe_cache_slots = 0;
+            new_slots = 0;
+            LLAMA_LOG_ERROR("%s: resize and rollback allocation failed; cache disabled, server remains on CPU experts\n", __func__);
+            return false;
+        }
+    }
     if (buf == nullptr) {
         return false;
     }
+
     ggml_backend_buffer_ptr buf_guard{buf};
     ggml_backend_buffer_set_usage(buf_guard.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
     const size_t new_buffer_bytes = ggml_backend_buffer_get_size(buf_guard.get());
+    fill_cache(resized);
 
-    std::vector<uint8_t> slab;
-    std::vector<int32_t> map_hot, map_cold;
-    for (const auto & [il, order] : pimpl->moe_cache_rankings) {
-        auto & l = layers[il];
-        auto it = std::find_if(resized.begin(), resized.end(), [il](const resized_layer & item) { return item.il == il; });
-        GGML_ASSERT(it != resized.end());
-        const int64_t n_expert = l.ffn_gate_exps->ne[2];
-        const int64_t slots = it->gate->ne[2];
-        map_hot.assign(n_expert, -1);
-        map_cold.resize(n_expert);
-        for (int64_t e = 0; e < n_expert; e++) {
-            map_cold[e] = (int32_t) e;
-        }
-        const ggml_tensor * srcs[3] = { l.ffn_gate_exps, l.ffn_up_exps, l.ffn_down_exps };
-        ggml_tensor * dsts[3] = { it->gate, it->up, it->down };
-        const int64_t count = std::min<int64_t>(slots, order.size());
-        for (int64_t s = 0; s < count; s++) {
-            const int32_t e = order[s];
-            map_hot[e] = (int32_t) s;
-            map_cold[e] = -1;
-            for (int t = 0; t < 3; t++) {
-                const size_t nb = srcs[t]->nb[2];
-                slab.resize(nb);
-                ggml_backend_tensor_get(srcs[t], slab.data(), (size_t)e*nb, nb);
-                ggml_backend_tensor_set(dsts[t], slab.data(), (size_t)s*nb, nb);
-            }
-        }
-        ggml_backend_tensor_set(it->map_hot, map_hot.data(), 0, n_expert*sizeof(int32_t));
-        ggml_backend_tensor_set(it->map_cold, map_cold.data(), 0, n_expert*sizeof(int32_t));
-    }
-
-    std::vector<ggml_backend_buffer_ptr> buffers;
     buffers.emplace_back(std::move(buf_guard));
+    const size_t new_index = pimpl->ctxs_bufs.size();
     pimpl->ctxs_bufs.emplace_back(std::move(ctx), std::move(buffers));
     for (const auto & item : resized) {
         auto & l = layers[item.il];
@@ -2145,9 +2235,14 @@ bool llama_model_base::resize_moe_expert_cache(int32_t n_slots, int32_t & old_sl
         l.moe_map_cold = item.map_cold;
     }
 
-    pimpl->ctxs_bufs.erase(pimpl->ctxs_bufs.begin() + old_index);
-    pimpl->moe_cache_bundle_index = old_index;
+    if (had_cache) {
+        pimpl->ctxs_bufs.erase(pimpl->ctxs_bufs.begin() + old_index);
+        pimpl->moe_cache_bundle_index = old_index;
+    } else {
+        pimpl->moe_cache_bundle_index = new_index;
+    }
     pimpl->moe_cache_slots = n_slots;
+    new_slots = n_slots;
     if (old_buffer_bytes > new_buffer_bytes) {
         released_bytes = old_buffer_bytes - new_buffer_bytes;
     } else if (new_buffer_bytes > old_buffer_bytes) {
@@ -3045,8 +3140,9 @@ llama_model_params llama_model_default_params() {
 }
 
 bool llama_model_moe_cache_resize(const llama_model * model, int32_t n_slots,
-        int32_t * old_slots, size_t * released_bytes, size_t * allocated_bytes) {
+        int32_t * old_slots, int32_t * new_slots, size_t * released_bytes, size_t * allocated_bytes) {
     if (old_slots) { *old_slots = 0; }
+    if (new_slots) { *new_slots = 0; }
     if (released_bytes) { *released_bytes = 0; }
     if (allocated_bytes) { *allocated_bytes = 0; }
     if (model == nullptr) {
@@ -3059,17 +3155,19 @@ bool llama_model_moe_cache_resize(const llama_model * model, int32_t n_slots,
     }
 
     int32_t old_count = 0;
+    int32_t new_count = 0;
     size_t freed = 0;
     size_t used = 0;
     bool ok = false;
     try {
-        ok = base->resize_moe_expert_cache(n_slots, old_count, freed, used);
+        ok = base->resize_moe_expert_cache(n_slots, old_count, new_count, freed, used);
     } catch (const std::exception &) {
         ok = false;
     } catch (...) {
         ok = false;
     }
     if (old_slots) { *old_slots = old_count; }
+    if (new_slots) { *new_slots = new_count; }
     if (released_bytes) { *released_bytes = freed; }
     if (allocated_bytes) { *allocated_bytes = used; }
     return ok;
