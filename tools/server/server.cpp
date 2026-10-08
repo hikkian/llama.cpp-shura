@@ -136,6 +136,18 @@ int llama_server(common_params & params, int argc, char ** argv) {
                                && params.model.hf_repo.empty()
                                && params.model.docker_repo.empty();
 
+    if (params.moe_cache_live_resize) {
+        if (is_router_server || (params.hostname != "127.0.0.1" &&
+                params.hostname != "localhost" && params.hostname != "::1")) {
+            SRV_ERR("%s\n", "--moe-cache-live-resize requires a single-model server bound to loopback");
+            return 1;
+        }
+        if (params.moe_cache_profile.empty() || params.moe_cache_slots <= 0) {
+            SRV_ERR("%s\n", "--moe-cache-live-resize requires --moe-cache-profile and a positive --moe-cache-slots value");
+            return 1;
+        }
+    }
+
     // skip device enumeration so the CUDA primary context stays uncreated
     common_params_print_info(params, !is_router_server);
 
@@ -256,6 +268,9 @@ int llama_server(common_params & params, int argc, char ** argv) {
     ctx_http.post("/chat/completions",         ex_wrapper(routes.post_chat_completions));
     ctx_http.post("/v1/chat/completions",      ex_wrapper(routes.post_chat_completions));
     ctx_http.post("/v1/chat/completions/control", ex_wrapper(routes.post_control));
+    if (params.moe_cache_live_resize) {
+        ctx_http.post("/moe-cache/slots",     ex_wrapper(routes.post_moe_cache_resize));
+    }
     ctx_http.post("/v1/responses",             ex_wrapper(routes.post_responses_oai));
     ctx_http.post("/responses",                ex_wrapper(routes.post_responses_oai));
     ctx_http.post("/v1/audio/transcriptions",  ex_wrapper(routes.post_transcriptions_oai));

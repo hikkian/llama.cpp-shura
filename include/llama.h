@@ -343,6 +343,7 @@ extern "C" {
         // MoE expert cache: keep the hottest routed experts per layer resident in GPU memory
         const char * moe_cache_profile; // routing profile CSV from llama-moe-trace (NULL = disabled)
         int32_t      moe_cache_slots;   // experts cached per layer (0 = disabled)
+        bool         moe_cache_live_resize; // allow the local server to resize the expert cache
         // target for a draft head that declares nextn_shared_target_tensors; must outlive this model
         const struct llama_model * model_shared;
 
@@ -586,6 +587,9 @@ extern "C" {
     DEPRECATED(LLAMA_API int32_t llama_n_vocab    (const struct llama_vocab * vocab), "use llama_vocab_n_tokens instead");
 
     LLAMA_API const struct llama_model * llama_get_model   (const struct llama_context * ctx);
+    // Caller must serialize this with inference; the server does so at decode boundaries.
+    LLAMA_API bool llama_model_moe_cache_resize(const struct llama_model * model, int32_t n_slots,
+            int32_t * old_slots, size_t * released_bytes, size_t * allocated_bytes);
     LLAMA_API           llama_memory_t   llama_get_memory  (const struct llama_context * ctx);
     LLAMA_API  enum llama_pooling_type   llama_pooling_type(const struct llama_context * ctx); // TODO: rename to llama_get_pooling_type
 

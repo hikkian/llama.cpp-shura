@@ -2818,6 +2818,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_MOE_CACHE_SLOTS"));
     add_opt(common_arg(
+        {"--moe-cache-live-resize"},
+        "allow local live resizing of the expert cache (default: disabled)",
+        [](common_params & params) {
+            params.moe_cache_live_resize = true;
+        }
+    ).set_env("LLAMA_ARG_MOE_CACHE_LIVE_RESIZE"));
+    add_opt(common_arg(
         {"-ncffn", "--n-cpu-ffn"}, "N",
         "keep the dense FFN weights of the first N layers in the CPU\n"
         "(dense models; for MoE expert weights use --n-cpu-moe)",

@@ -235,6 +235,17 @@ static void test(void) {
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.model.path == "model_file.gguf");
 
+    {
+        common_params live_resize_params;
+        assert(!live_resize_params.moe_cache_live_resize);
+        assert(!llama_model_default_params().moe_cache_live_resize);
+        argv = {"binary_name", "--moe-cache-live-resize"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), live_resize_params, LLAMA_EXAMPLE_SERVER));
+        assert(live_resize_params.moe_cache_live_resize);
+        const llama_model_params model_params = common_model_params_to_llama(live_resize_params);
+        assert(model_params.moe_cache_live_resize);
+    }
+
     argv = {"binary_name", "-t", "1234"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.cpuparams.n_threads == 1234);

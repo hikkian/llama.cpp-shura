@@ -830,6 +830,8 @@ struct llama_model_base : public llama_model {
     // GGML_MOE_CACHE_PROFILE + GGML_MOE_CACHE_SLOTS: build GPU-resident hot
     // expert packs for CPU-offloaded MoE layers (see llama_layer::*_exps_hot)
     void init_moe_expert_cache();
+    bool resize_moe_expert_cache(int32_t n_slots, int32_t & old_slots,
+            size_t & released_bytes, size_t & allocated_bytes);
 
     // model must define these
     void load_arch_hparams(llama_model_loader & ml) override = 0;

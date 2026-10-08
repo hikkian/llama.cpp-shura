@@ -1155,6 +1155,9 @@ struct llama_model::impl {
 
     // contexts where the model tensors metadata is stored as well as the corresponding buffers:
     std::vector<std::pair<ggml_context_ptr, std::vector<ggml_backend_buffer_ptr>>> ctxs_bufs;
+    std::map<int, std::vector<int32_t>> moe_cache_rankings;
+    size_t moe_cache_bundle_index = SIZE_MAX;
+    int32_t moe_cache_slots = 0;
 
     buft_list_t cpu_buft_list;
     std::map<ggml_backend_dev_t, buft_list_t> gpu_buft_list;
@@ -1970,6 +1973,14 @@ void llama_model_base::init_moe_expert_cache() {
         }
         std::sort(ranked.begin(), ranked.end());
 
+        if (params.moe_cache_live_resize) {
+            auto & order = pimpl->moe_cache_rankings[il];
+            order.reserve(ranked.size());
+            for (const auto & item : ranked) {
+                order.push_back(item.second);
+            }
+        }
+
         map_hot.assign(n_expert, -1);
         map_cold.resize(n_expert);
         for (int64_t e = 0; e < n_expert; e++) {
@@ -1995,9 +2006,156 @@ void llama_model_base::init_moe_expert_cache() {
 
     pimpl->ctxs_bufs.emplace_back(ggml_context_ptr{ctx}, std::vector<ggml_backend_buffer_ptr>{});
     pimpl->ctxs_bufs.back().second.emplace_back(buf);
+    pimpl->moe_cache_slots = n_slots;
+    pimpl->moe_cache_bundle_index = pimpl->ctxs_bufs.size() - 1;
 
     LLAMA_LOG_INFO("%s: expert cache: %zu layers x %d slots, %.2f MiB uploaded to %s\n",
         __func__, pack_layers.size(), n_slots, total_bytes/1024.0/1024.0, ggml_backend_buft_name(buft));
+}
+
+bool llama_model_base::resize_moe_expert_cache(int32_t n_slots, int32_t & old_slots,
+        size_t & released_bytes, size_t & allocated_bytes) {
+    old_slots = pimpl->moe_cache_slots;
+    released_bytes = 0;
+    allocated_bytes = 0;
+
+    if (!params.moe_cache_live_resize || old_slots <= 0 || pimpl->moe_cache_bundle_index >= pimpl->ctxs_bufs.size()) {
+        return false;
+    }
+    if (n_slots <= 0) {
+        return false;
+    }
+    if (n_slots == old_slots) {
+        return true;
+    }
+    if (pimpl->moe_cache_rankings.empty()) {
+        return false;
+    }
+
+    ggml_backend_dev_t dev = nullptr;
+    for (const auto & d : devices) {
+        if (!d.is_meta) { dev = d.dev; break; }
+    }
+    if (dev == nullptr || ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) {
+        return false;
+    }
+    ggml_backend_buffer_type_t buft = ggml_backend_dev_buffer_type(dev);
+
+    const size_t old_index = pimpl->moe_cache_bundle_index;
+    size_t old_buffer_bytes = 0;
+    for (const auto & buf : pimpl->ctxs_bufs[old_index].second) {
+        old_buffer_bytes += ggml_backend_buffer_get_size(buf.get());
+    }
+
+    const size_t n_layers = pimpl->moe_cache_rankings.size();
+    ggml_init_params ctx_params = {
+        /*.mem_size   =*/ (5*n_layers + 1)*ggml_tensor_overhead(),
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context_ptr ctx{ggml_init(ctx_params)};
+    if (!ctx) {
+        return false;
+    }
+
+    struct resized_layer {
+        int il;
+        ggml_tensor * gate;
+        ggml_tensor * up;
+        ggml_tensor * down;
+        ggml_tensor * map_hot;
+        ggml_tensor * map_cold;
+    };
+    std::vector<resized_layer> resized;
+
+    for (const auto & [il, _] : pimpl->moe_cache_rankings) {
+        auto & l = layers[il];
+        const int64_t n_expert = l.ffn_gate_exps->ne[2];
+        if (n_slots > n_expert) {
+            return false;
+        }
+        const int64_t slots = std::min<int64_t>(n_slots, n_expert);
+        resized_layer next = {
+            il,
+            ggml_new_tensor_3d(ctx.get(), l.ffn_gate_exps->type, l.ffn_gate_exps->ne[0], l.ffn_gate_exps->ne[1], slots),
+            ggml_new_tensor_3d(ctx.get(), l.ffn_up_exps->type, l.ffn_up_exps->ne[0], l.ffn_up_exps->ne[1], slots),
+            ggml_new_tensor_3d(ctx.get(), l.ffn_down_exps->type, l.ffn_down_exps->ne[0], l.ffn_down_exps->ne[1], slots),
+            ggml_new_tensor_2d(ctx.get(), GGML_TYPE_I32, 1, n_expert),
+            ggml_new_tensor_2d(ctx.get(), GGML_TYPE_I32, 1, n_expert),
+        };
+        if (!next.gate || !next.up || !next.down || !next.map_hot || !next.map_cold) {
+            return false;
+        }
+        ggml_format_name(next.gate, "blk.%d.ffn_gate_exps_hot", il);
+        ggml_format_name(next.up, "blk.%d.ffn_up_exps_hot", il);
+        ggml_format_name(next.down, "blk.%d.ffn_down_exps_hot", il);
+        ggml_format_name(next.map_hot, "blk.%d.moe_map_hot", il);
+        ggml_format_name(next.map_cold, "blk.%d.moe_map_cold", il);
+        resized.push_back(next);
+    }
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft);
+    if (buf == nullptr) {
+        return false;
+    }
+    ggml_backend_buffer_ptr buf_guard{buf};
+    ggml_backend_buffer_set_usage(buf_guard.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+    const size_t new_buffer_bytes = ggml_backend_buffer_get_size(buf_guard.get());
+
+    std::vector<uint8_t> slab;
+    std::vector<int32_t> map_hot, map_cold;
+    for (const auto & [il, order] : pimpl->moe_cache_rankings) {
+        auto & l = layers[il];
+        auto it = std::find_if(resized.begin(), resized.end(), [il](const resized_layer & item) { return item.il == il; });
+        GGML_ASSERT(it != resized.end());
+        const int64_t n_expert = l.ffn_gate_exps->ne[2];
+        const int64_t slots = it->gate->ne[2];
+        map_hot.assign(n_expert, -1);
+        map_cold.resize(n_expert);
+        for (int64_t e = 0; e < n_expert; e++) {
+            map_cold[e] = (int32_t) e;
+        }
+        const ggml_tensor * srcs[3] = { l.ffn_gate_exps, l.ffn_up_exps, l.ffn_down_exps };
+        ggml_tensor * dsts[3] = { it->gate, it->up, it->down };
+        const int64_t count = std::min<int64_t>(slots, order.size());
+        for (int64_t s = 0; s < count; s++) {
+            const int32_t e = order[s];
+            map_hot[e] = (int32_t) s;
+            map_cold[e] = -1;
+            for (int t = 0; t < 3; t++) {
+                const size_t nb = srcs[t]->nb[2];
+                slab.resize(nb);
+                ggml_backend_tensor_get(srcs[t], slab.data(), (size_t)e*nb, nb);
+                ggml_backend_tensor_set(dsts[t], slab.data(), (size_t)s*nb, nb);
+            }
+        }
+        ggml_backend_tensor_set(it->map_hot, map_hot.data(), 0, n_expert*sizeof(int32_t));
+        ggml_backend_tensor_set(it->map_cold, map_cold.data(), 0, n_expert*sizeof(int32_t));
+    }
+
+    std::vector<ggml_backend_buffer_ptr> buffers;
+    buffers.emplace_back(std::move(buf_guard));
+    pimpl->ctxs_bufs.emplace_back(std::move(ctx), std::move(buffers));
+    for (const auto & item : resized) {
+        auto & l = layers[item.il];
+        l.ffn_gate_exps_hot = item.gate;
+        l.ffn_up_exps_hot = item.up;
+        l.ffn_down_exps_hot = item.down;
+        l.moe_map_hot = item.map_hot;
+        l.moe_map_cold = item.map_cold;
+    }
+
+    pimpl->ctxs_bufs.erase(pimpl->ctxs_bufs.begin() + old_index);
+    pimpl->moe_cache_bundle_index = old_index;
+    pimpl->moe_cache_slots = n_slots;
+    if (old_buffer_bytes > new_buffer_bytes) {
+        released_bytes = old_buffer_bytes - new_buffer_bytes;
+    } else if (new_buffer_bytes > old_buffer_bytes) {
+        allocated_bytes = new_buffer_bytes - old_buffer_bytes;
+    }
+    LLAMA_LOG_INFO("%s: expert cache resized from %d to %d slots; released %.2f MiB, allocated %.2f MiB\n",
+            __func__, old_slots, n_slots, released_bytes/1024.0/1024.0, allocated_bytes/1024.0/1024.0);
+    return true;
 }
 
 ggml_tensor * llama_model_base::create_tensor(llama_model_loader & ml, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
@@ -2873,6 +3031,7 @@ llama_model_params llama_model_default_params() {
         /*.kv_overrides                =*/ nullptr,
         /*.moe_cache_profile           =*/ nullptr,
         /*.moe_cache_slots             =*/ 0,
+        /*.moe_cache_live_resize       =*/ false,
         /*.model_shared                =*/ nullptr,
         /*.vocab_only                  =*/ false,
         /*.check_tensors               =*/ false,
@@ -2883,6 +3042,37 @@ llama_model_params llama_model_default_params() {
     };
 
     return result;
+}
+
+bool llama_model_moe_cache_resize(const llama_model * model, int32_t n_slots,
+        int32_t * old_slots, size_t * released_bytes, size_t * allocated_bytes) {
+    if (old_slots) { *old_slots = 0; }
+    if (released_bytes) { *released_bytes = 0; }
+    if (allocated_bytes) { *allocated_bytes = 0; }
+    if (model == nullptr) {
+        return false;
+    }
+
+    auto * base = dynamic_cast<llama_model_base *>(const_cast<llama_model *>(model));
+    if (base == nullptr) {
+        return false;
+    }
+
+    int32_t old_count = 0;
+    size_t freed = 0;
+    size_t used = 0;
+    bool ok = false;
+    try {
+        ok = base->resize_moe_expert_cache(n_slots, old_count, freed, used);
+    } catch (const std::exception &) {
+        ok = false;
+    } catch (...) {
+        ok = false;
+    }
+    if (old_slots) { *old_slots = old_count; }
+    if (released_bytes) { *released_bytes = freed; }
+    if (allocated_bytes) { *allocated_bytes = used; }
+    return ok;
 }
 
 const llama_vocab * llama_model_get_vocab(const llama_model * model) {
