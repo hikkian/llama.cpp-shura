@@ -946,6 +946,14 @@ public:
     std::vector<llm_graph_input_ptr> inputs;
     std::vector<llm_graph_fused_node> fused_nodes;
 
+    struct moe_cache_route {
+        int32_t layer;
+        int32_t n_expert_used;
+        int32_t n_tokens;
+        ggml_tensor * ids_flat;
+    };
+    std::vector<moe_cache_route> moe_cache_routes;
+
     ggml_context_ptr ctx_compute;
 
     // memory buffers used to evaluate the model

@@ -344,6 +344,7 @@ private:
     ggml_backend_sched_ptr sched;
 
     bool sched_need_reserve = true;
+    uint64_t moe_cache_generation = 0;
 
     ggml_backend_t backend_cpu = nullptr;
     std::vector<ggml_backend_ptr> backends;

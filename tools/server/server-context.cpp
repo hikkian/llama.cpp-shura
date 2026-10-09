@@ -2146,6 +2146,35 @@ private:
 
         res->generation_params = slot.task->params; // copy the parameters
 
+        llama_moe_cache_stats moe_cache_stats = {};
+        if (params_base.moe_cache_policy == "hybrid" &&
+                llama_model_get_moe_cache_stats(llama_get_model(ctx_tgt), &moe_cache_stats)) {
+            const uint64_t routes = moe_cache_stats.hits + moe_cache_stats.misses;
+            const double hit_rate = routes > 0 ? double(moe_cache_stats.hits) / double(routes) : 0.0;
+            const double copies_per_token = moe_cache_stats.tokens > 0
+                    ? double(moe_cache_stats.copies) / double(moe_cache_stats.tokens) : 0.0;
+            const double copied_bytes_per_token = moe_cache_stats.tokens > 0
+                    ? double(moe_cache_stats.copied_bytes) / double(moe_cache_stats.tokens) : 0.0;
+            res->moe_cache_stats = json {
+                {"policy", "hybrid"},
+                {"tokens", moe_cache_stats.tokens},
+                {"hits", moe_cache_stats.hits},
+                {"misses", moe_cache_stats.misses},
+                {"hit_rate", hit_rate},
+                {"insertions", moe_cache_stats.insertions},
+                {"copies", moe_cache_stats.copies},
+                {"copies_per_token", copies_per_token},
+                {"copied_bytes", moe_cache_stats.copied_bytes},
+                {"copied_bytes_per_token", copied_bytes_per_token},
+            };
+            LOG_INF("hybrid moe cache: hits=%llu misses=%llu insertions=%llu copies=%llu copies/token=%.3f copied_bytes/token=%.1f\n",
+                    (unsigned long long) moe_cache_stats.hits,
+                    (unsigned long long) moe_cache_stats.misses,
+                    (unsigned long long) moe_cache_stats.insertions,
+                    (unsigned long long) moe_cache_stats.copies,
+                    copies_per_token, copied_bytes_per_token);
+        }
+
         queue_results.send(std::move(res));
     }
 

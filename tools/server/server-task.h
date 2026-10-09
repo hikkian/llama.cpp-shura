@@ -328,6 +328,7 @@ struct server_task_result_cmpl_final : server_task_result {
     bool include_usage;
     server_slot_stats stats;
     std::string prompt;
+    json moe_cache_stats;
 
     bool truncated;
     int32_t n_decoded;
