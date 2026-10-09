@@ -2482,6 +2482,18 @@ private:
                 {
                     auto res = std::make_unique<server_task_result_moe_cache_resize>();
                     res->id = task.id;
+                    // Expert-cache buffers are referenced by the active decode path.
+                    // Refuse a resize while any slot is processing; otherwise a concurrent
+                    // unmap can invalidate tensors still in use by the CPU/GPU workers.
+                    const bool has_active_request = std::any_of(slots.begin(), slots.end(),
+                            [](const server_slot & slot) { return slot.is_processing(); });
+                    if (has_active_request) {
+                        res->old_slots = -1;
+                        res->new_slots = -1;
+                        res->message = "resize requires an idle request boundary";
+                        queue_results.send(std::move(res));
+                        break;
+                    }
                     size_t released_bytes = 0;
                     size_t allocated_bytes = 0;
                     res->success = llama_model_moe_cache_resize(
