@@ -1852,11 +1852,12 @@ void llama_model_base::init_moe_expert_cache() {
     if (profile_path == nullptr || profile_path[0] == '\0') {
         profile_path = getenv("GGML_MOE_CACHE_PROFILE");
     }
-    if (n_slots <= 0) {
+    if (n_slots <= 0 && !params.moe_cache_live_resize) {
         const char * slots_env = getenv("GGML_MOE_CACHE_SLOTS");
         n_slots = slots_env ? atoi(slots_env) : 0;
     }
-    if (profile_path == nullptr || profile_path[0] == '\0' || n_slots <= 0) {
+    if (profile_path == nullptr || profile_path[0] == '\0'
+            || (n_slots <= 0 && !params.moe_cache_live_resize)) {
         return;
     }
 
@@ -1911,6 +1912,30 @@ void llama_model_base::init_moe_expert_cache() {
     }
     if (pack_layers.empty()) {
         LLAMA_LOG_INFO("%s: no CPU-resident MoE layers - expert cache not built\n", __func__);
+        return;
+    }
+
+    if (n_slots == 0) {
+        if (params.moe_cache_live_resize) {
+            for (int il : pack_layers) {
+                std::vector<std::pair<int64_t, int32_t>> ranked;
+                for (const auto & [expert, count] : freq[il]) {
+                    if (expert < layers[il].ffn_gate_exps->ne[2]) {
+                        ranked.push_back({-count, expert});
+                    }
+                }
+                std::sort(ranked.begin(), ranked.end());
+                auto & order = pimpl->moe_cache_rankings[il];
+                order.reserve(ranked.size());
+                for (const auto & item : ranked) {
+                    order.push_back(item.second);
+                }
+            }
+        }
+        pimpl->moe_cache_slots = 0;
+        pimpl->moe_cache_bundle_index = SIZE_MAX;
+        LLAMA_LOG_INFO("%s: expert cache disabled at startup; retained %zu layer rankings for live growth\n",
+                __func__, pimpl->moe_cache_rankings.size());
         return;
     }
 
@@ -2020,7 +2045,7 @@ bool llama_model_base::resize_moe_expert_cache(int32_t n_slots, int32_t & old_sl
     released_bytes = 0;
     allocated_bytes = 0;
 
-    if (!params.moe_cache_live_resize || n_slots <= 0 || pimpl->moe_cache_rankings.empty()) {
+    if (!params.moe_cache_live_resize || n_slots < 0 || pimpl->moe_cache_rankings.empty()) {
         return false;
     }
     if (n_slots == old_slots) {
@@ -2030,6 +2055,35 @@ bool llama_model_base::resize_moe_expert_cache(int32_t n_slots, int32_t & old_sl
     const bool had_cache = old_slots > 0 && pimpl->moe_cache_bundle_index < pimpl->ctxs_bufs.size();
     if (old_slots > 0 && !had_cache) {
         return false;
+    }
+
+    // Zero is a supported, reversible gear: detach the hot tensors and release their
+    // buffer while retaining moe_cache_rankings so a later resize can rebuild the pack.
+    if (n_slots == 0) {
+        const size_t cache_index = pimpl->moe_cache_bundle_index;
+        if (!had_cache || cache_index >= pimpl->ctxs_bufs.size()) {
+            return false;
+        }
+        size_t old_buffer_bytes = 0;
+        for (const auto & buf : pimpl->ctxs_bufs[cache_index].second) {
+            old_buffer_bytes += ggml_backend_buffer_get_size(buf.get());
+        }
+        for (const auto & [il, _] : pimpl->moe_cache_rankings) {
+            auto & l = layers[il];
+            l.ffn_gate_exps_hot = nullptr;
+            l.ffn_up_exps_hot = nullptr;
+            l.ffn_down_exps_hot = nullptr;
+            l.moe_map_hot = nullptr;
+            l.moe_map_cold = nullptr;
+        }
+        pimpl->ctxs_bufs.erase(pimpl->ctxs_bufs.begin() + cache_index);
+        pimpl->moe_cache_bundle_index = SIZE_MAX;
+        pimpl->moe_cache_slots = 0;
+        new_slots = 0;
+        released_bytes = old_buffer_bytes;
+        LLAMA_LOG_INFO("%s: expert cache resized from %d to 0 slots; released %.2f MiB\n",
+                __func__, old_slots, released_bytes/1024.0/1024.0);
+        return true;
     }
 
     ggml_backend_dev_t dev = nullptr;

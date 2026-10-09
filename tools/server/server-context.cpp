@@ -5014,8 +5014,8 @@ void server_routes::init_routes() {
             return res;
         }
         const int32_t target = (int32_t) target_value;
-        if (target <= 0) {
-            res->error(format_error_response("slots must be greater than zero", ERROR_TYPE_INVALID_REQUEST));
+        if (target < 0) {
+            res->error(format_error_response("slots must not be negative", ERROR_TYPE_INVALID_REQUEST));
             return res;
         }
 
