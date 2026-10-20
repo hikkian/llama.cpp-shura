@@ -14,7 +14,7 @@ This repository is a fork of llama.cpp. The code is released under the MIT Licen
 3. TurboQuant: the TurboQuant KV-cache types (turbo3/turbo4), their CUDA and HIP flash-attention kernels and the
    turboquant rotation data come from the TurboQuant work in the fork by TheTom (branch feature/turboquant-kv-cache).
    Attribution to that work is kept in the commit history of the files it touches.
-   [TO VERIFY before publishing: the license text of that fork. It was not read in this preparation step.]
+   That fork is MIT-licensed (GitHub license API for TheTom/llama-cpp-turboquant: MIT, checked 2026-10-20).
 
 4. Changes made in this fork (MIT, same as above):
    - an opt-in expert cache in host memory with live resizing, zero slots and a rollback-safe resize
