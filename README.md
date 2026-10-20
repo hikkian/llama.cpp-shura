@@ -1,9 +1,18 @@
 > [!NOTE]
-> **This is a fork of llama.cpp** (MIT, see [NOTICE](NOTICE)). Base: a snapshot of thecodacus/llama.cpp `perf` (2026-09-03,
-> upstream 42f0225fe). Added here: an opt-in expert cache in host memory with live resizing and a bounded LRU policy,
-> context checkpoints for slot save/restore, and the TurboQuant KV types (see NOTICE for their origin). Built and measured
-> with the Shura installer, which applies its own patch stack on top of this code (scripts/build-llama.sh in the Shura repository).
-> Upstream documentation follows.
+> **This is the llama.cpp fork used by [Shura](https://github.com/hikkian/shura)** — local AI coding on a consumer GPU.
+> MIT, see [NOTICE](NOTICE) for every source and license.
+>
+> - **Base:** a snapshot of [thecodacus/llama.cpp](https://github.com/thecodacus/llama.cpp) branch `perf` (2026-09-03,
+>   upstream `42f0225fe`). Its own README sections («This fork — …») are kept below as they were.
+> - **Added here:** an opt-in expert cache in host memory with live resizing (`--moe-cache-slots`,
+>   `--moe-cache-live-resize`, `POST /moe-cache/slots`), zero slots and a rollback-safe resize, a bounded LRU policy,
+>   and context checkpoints for slot save/restore (`--slot-save-checkpoints`). TurboQuant KV types (turbo3/turbo4)
+>   come with the base (origin: TheTom/llama-cpp-turboquant, MIT).
+> - **Measured build:** the tag `shura-measured-95d26d1` is the exact code Shura was measured on. The Shura installer
+>   (`scripts/build-llama.sh` in the Shura repository) clones it and applies Shura's patch stack (HIP/CUDA kernel fixes
+>   and upstream picks) before building.
+>
+> Below: the README of the base snapshot, then the upstream documentation.
 
 # llama.cpp
 
