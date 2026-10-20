@@ -1,0 +1,27 @@
+llama.cpp fork for Shura (hikkian/llama.cpp-shura) — attribution
+
+This repository is a fork of llama.cpp. The code is released under the MIT License (see LICENSE).
+
+1. Upstream: llama.cpp, https://github.com/ggml-org/llama.cpp, MIT License, Copyright (c) 2023-2026 The ggml authors.
+   Files that are not changed here keep their original copyright notices.
+
+2. Base snapshot: this fork starts from a snapshot of the thecodacus/llama.cpp fork, branch `perf`, taken on
+   2026-09-03 (upstream commit 42f0225fe, "server : use pytest-xdist for server tests (#28298)"). That snapshot is
+   the source of the commit "Import llama.cpp perf source baseline" (8e5f4b6). Its license is the one of that
+   repository. The LICENSE file of the base snapshot (commit 8e5f4b6) is the MIT License, Copyright (c) 2023-2026 The ggml
+   authors, the same text as upstream.
+
+3. TurboQuant: the TurboQuant KV-cache types (turbo3/turbo4), their CUDA and HIP flash-attention kernels and the
+   turboquant rotation data come from the TurboQuant work in the fork by TheTom (branch feature/turboquant-kv-cache).
+   Attribution to that work is kept in the commit history of the files it touches.
+   [TO VERIFY before publishing: the license text of that fork. It was not read in this preparation step.]
+
+4. Changes made in this fork (MIT, same as above):
+   - an opt-in expert cache in host memory with live resizing, zero slots and a rollback-safe resize
+     (src/llama-model.cpp, src/llama-moe-cache-policy.h, tools/server, common/arg.cpp);
+   - an opt-in bounded LRU policy for that cache;
+   - context (slot) checkpoints for the server's slot save and restore;
+   - tests for the cache policy and the argument parser.
+
+5. The HIP and CUDA patch stack that the Shura installer applies on top of this fork (patches/ in the Shura
+   repository) is not part of this repository; it is listed and checked by scripts/build-llama.sh there.

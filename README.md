@@ -1,3 +1,10 @@
+> [!NOTE]
+> **This is a fork of llama.cpp** (MIT, see [NOTICE](NOTICE)). Base: a snapshot of thecodacus/llama.cpp `perf` (2026-09-03,
+> upstream 42f0225fe). Added here: an opt-in expert cache in host memory with live resizing and a bounded LRU policy,
+> context checkpoints for slot save/restore, and the TurboQuant KV types (see NOTICE for their origin). Built and measured
+> with the Shura installer, which applies its own patch stack on top of this code (scripts/build-llama.sh in the Shura repository).
+> Upstream documentation follows.
+
 # llama.cpp
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
