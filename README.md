@@ -1,3 +1,11 @@
+> [!IMPORTANT]
+> **This repository has moved to [hikkian/shura.cpp](https://github.com/hikkian/shura.cpp).**
+> The fork of llama.cpp used by Shura continues there as the `shura` branch, rebased on upstream master, with the VRAM
+> governor, the elastic expert cache and pause/resume. This repository is kept read-only for the links that point here;
+> it will not receive updates. The work it was built on, Anirban Kar's MoE performance fork
+> [thecodacus/llama.cpp](https://github.com/thecodacus/llama.cpp) and the TurboQuant KV types from
+> [TheTom/llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant), is credited in shura.cpp's README and NOTICE.
+
 > [!NOTE]
 > **This is the llama.cpp fork used by [Shura](https://github.com/hikkian/shura)** — local AI coding on a consumer GPU.
 > MIT, see [NOTICE](NOTICE) for every source and license.
